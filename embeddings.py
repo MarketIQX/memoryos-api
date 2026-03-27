@@ -1,87 +1,45 @@
-import voyageai
-from config import config
+"""
+Embeddings — fastembed local inference.
+Replaces Voyage AI. No external API. No rate limits. No cost.
+Model: BAAI/bge-small-en-v1.5 — 384-dim, CPU, MIT license.
+First boot: downloads 130MB model, cached permanently by Railway.
+"""
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
+_model = None
 
-# Single Voyage AI client instance
-_voyage_client = None
+def get_model():
+    global _model
+    if _model is None:
+        from fastembed import TextEmbedding
+        _model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+        logger.info("fastembed loaded: BAAI/bge-small-en-v1.5 (384-dim)")
+    return _model
 
-
-def get_voyage_client():
-    global _voyage_client
-    if _voyage_client is None:
-        _voyage_client = voyageai.Client(api_key=config.VOYAGE_API_KEY)
-    return _voyage_client
-
-
-async def embed_text(text: str, importance: float = 0.5) -> list[float] | None:
-    """
-    Generates a 1024-dimensional embedding for the given text.
-
-    Routing logic (from technical documentation):
-    - importance >= 0.7: Voyage AI voyage-3-lite (highest quality, Indic language support)
-    - importance < 0.7: Voyage AI voyage-3-lite still (local Ollama fallback in future)
-
-    Why Voyage AI over OpenAI:
-    - Superior multilingual/Indic script support (Hindi, Marathi, Tamil, Telugu, Gujarati)
-    - 50M free tokens/month
-    - 1024 dimensions (34% less storage than OpenAI's 1536)
-    - Designed for retrieval, not generation
-
-    CRITICAL: The same model must be used for both write and read.
-    Mixing models breaks cosine similarity.
-    """
+async def embed_text(text: str, importance: float = 0.5) -> Optional[list]:
+    """384-dim embedding for memory storage. Local CPU — no API call."""
     try:
-        client = get_voyage_client()
-        result = client.embed(
-            texts=[text],
-            model="voyage-3-lite",
-            input_type="document"
-        )
-        return result.embeddings[0]
+        return list(get_model().embed([text[:8192]]))[0].tolist()
     except Exception as e:
-        logger.error(f"Embedding failed for text (first 50 chars): '{text[:50]}': {e}")
+        logger.error(f"embed_text failed: {e}")
         return None
 
-
-async def embed_query(query: str) -> list[float] | None:
-    """
-    Generates a query embedding for semantic search.
-    Uses input_type='query' — optimised for retrieval queries.
-
-    CRITICAL: Must use the same model as embed_text().
-    This is verified in the health check.
-    """
+async def embed_query(query: str) -> Optional[list]:
+    """384-dim embedding for semantic search. Same model as embed_text."""
     try:
-        client = get_voyage_client()
-        result = client.embed(
-            texts=[query],
-            model="voyage-3-lite",
-            input_type="query"
-        )
-        return result.embeddings[0]
+        return list(get_model().embed([query[:8192]]))[0].tolist()
     except Exception as e:
-        logger.error(f"Query embedding failed: {e}")
+        logger.error(f"embed_query failed: {e}")
         return None
-
 
 async def verify_connection() -> dict:
-    """
-    Verifies Voyage AI is reachable and producing correct dimensions.
-    """
+    """Health check — model loaded and producing 384-dim vectors."""
     try:
-        test_embedding = await embed_text("MemoryOS health check", importance=1.0)
-        if test_embedding and len(test_embedding) in [512, 1024]:
-            return {
-                "status": "connected",
-                "model": "voyage-3-lite",
-                "dimensions": len(test_embedding)
-            }
-        return {
-            "status": "error",
-            "detail": f"Wrong dimensions: expected 1024, got {len(test_embedding) if test_embedding else 0}"
-        }
+        test = await embed_text("MemoryOS health check")
+        if test and len(test) == 384:
+            return {"status": "connected", "model": "BAAI/bge-small-en-v1.5", "dimensions": 384}
+        return {"status": "error", "detail": f"Got {len(test) if test else 0} dims, expected 384"}
     except Exception as e:
-        logger.error(f"Voyage AI connection failed: {e}")
         return {"status": "error", "detail": str(e)}
